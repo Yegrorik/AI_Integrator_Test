@@ -1,5 +1,5 @@
 import logging
-import requests
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
@@ -26,10 +26,10 @@ SYSTEM_PROMPT = (
 
 
 # ==========================
-# Взаимодействие с LLM (сырая работа с API)
+# Взаимодействие с LLM (сырая работа с API через aiohttp)
 # ==========================
 
-def call_llm(user_message: str) -> str:
+async def call_llm(user_message: str) -> str:
     if not settings.groq_api_key:
         return (
             "Ошибка конфигурации: не задан API‑ключ Groq. "
@@ -51,21 +51,30 @@ def call_llm(user_message: str) -> str:
     }
 
     try:
-        response = requests.post(
-            settings.groq_api_url,
-            json=payload,
-            headers=headers,
-            timeout=60,
-        )
-        response.raise_for_status()
-        data = response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                settings.groq_api_url,
+                json=payload,
+                headers=headers,
+                timeout=60,
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(
+                        "Ошибка запроса к LLM: статус %s, тело ответа: %s",
+                        response.status,
+                        text,
+                    )
+                    return f"Произошла ошибка при обращении к модели (HTTP {response.status})."
+
+                data = await response.json()
 
         # Классический формат Chat Completions
         content = data["choices"][0]["message"]["content"]
         return content.strip()
-    except requests.exceptions.RequestException as e:
-        logger.exception("Ошибка запроса к LLM")
-        return f"Произошла ошибка при обращении к модели: {e}"
+    except aiohttp.ClientError as e:
+        logger.exception("Ошибка сети при запросе к LLM")
+        return f"Сетевая ошибка при обращении к модели: {e}"
     except (KeyError, IndexError) as e:
         logger.exception("Неожиданный формат ответа LLM")
         return f"Не удалось распарсить ответ модели: {e}"
@@ -103,7 +112,7 @@ async def handle_text(message: Message) -> None:
 
     await message.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    reply = call_llm(user_text)
+    reply = await call_llm(user_text)
     await message.answer(reply, parse_mode=ParseMode.MARKDOWN)
 
 
